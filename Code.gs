@@ -72,17 +72,39 @@ var SHEET_NAME_MAP = {
   "Regular Courier":        ["Summary"],
   "Regular Courier Plus":   ["Summary"],
   "Campaign Inc":           ["Campaign Incentive"],
-  "Monthly Incentive Plus": ["Calculate","Calculate Bersih"],
-  "Monthly Incentive":      ["Calculate","Calculate Bersih"],
+  "Monthly Incentive Plus": ["Calculate", "Calculate Bersih"],
+  "Monthly Incentive":      ["Calculate", "Calculate Bersih"],
   "Daily Courier Biweekly": ["Calculate Bersih","Calculate"],
-  "Daily Courier Weekly":   ["Calculate","Calculate Bersih"],
+  "Daily Courier Weekly":   ["Calculate", "Calculate Bersih"],
   "Daily Courier":          ["Calculate", "Calculate Bersih"], // fallback
-  "Daily Operator":         ["Calculate", ,"Calculate Bersih","Sheet1"],           // rapel pakai Sheet1
+  "Daily Operator":         ["Calculate", "Sheet1","Calculate Bersih"],           // rapel pakai Sheet1
   "Unknown":                [],                                // skip
 };
 
 // Cache: diisi saat runtime (oleh loadSheetNamesFromTSV atau pakai hardcoded)
 var _SHEET_NAME_MAP_RUNTIME = null;
+
+// ─────────────────────────────────────────────────────────────
+//  FRAUD_HOLD_ALIAS_MAP — Kolom sumber fraud_hold_potong/collect
+//  per payroll group.
+//
+//  Nilai adalah teks YANG SUDAH DINORMALISASI (normalizeText).
+//  Artinya: lowercase, spasi tunggal, tanda baca (/,-,_,.) → spasi.
+//
+//  Matching dilakukan toleran: normalized cell harus mengandung
+//  normalized alias atau sebaliknya (substr), ATAU 70% kata kunci cocok.
+//
+//  Jika payrollGroup TIDAK ada di sini → accept semua alias
+//  (backward compatible untuk group yang tidak dikonfigurasi).
+// ─────────────────────────────────────────────────────────────
+var FRAUD_HOLD_ALIAS_MAP = {
+  "Regular Courier Plus":   "total fraud yang di hold potong",
+  "Regular Courier":        "total fraud yang di hold potong",
+  "Regular Operator":       "fraud yang tercollect",
+  "Daily Operator":         "fraud yang tercollect",
+  "Daily Courier Weekly":   "total fraud yg dihold dipotong",
+  "Daily Courier Biweekly": "fraud yang di hold potong",
+};
 
 // ─────────────────────────────────────────────────────────────
 //  URUTAN KOLOM OUTPUT — TIDAK DIUBAH
@@ -131,7 +153,11 @@ var COLUMN_MAPPING = {
   "name":                     ["name","nama","courier name","staff name","driver name"],
   "work_location":            ["location","hub","station","position"],
   "role":                     ["title","tittle","role","service"],
-  "no_telepon":               ["no hp","phone no","no handphone"],
+  "no_telepon":               [
+    "no hp","phone no","no handphone",
+    "no telepon","no tlp","nomor telepon","nomor hp","nomor handphone",
+    "telepon","no. hp","no.hp","no.telp","no. telp","mobile","mobile no"
+  ],
   "nik":                      ["nik ktp","nik"],
   "email":                    ["email"],
   "no_bpjs_tk":               ["no. bpjs tk"],
@@ -176,8 +202,8 @@ var COLUMN_MAPPING = {
                                "sisa kekurangan bpjs"],
   "cod_live":                 ["potongan cod live","cod live","cod (live)"],
   "lnd_live":                 ["potongan l&d live","l&d live","lost&damage (live)"],
-  "cod":                      ["potongan cod","cod (pot invoice)","cod (invoice)","potongan cod invoice"],
-  "lnd":                      ["potongan l&d","lost/damage","lost&damage","lost&damage (pot invoice)",
+  "cod":                      ["cod","potongan cod","cod (pot invoice)","cod (invoice)","potongan cod invoice"],
+  "lnd":                      ["l&d","lnd","potongan l&d","lost/damage","lost&damage","lost&damage (pot invoice)",
                                "lost&damage (invoice)","potongan l&d invoice"],
   "fraud_loss_sebelumnya":    ["jumlah fraud loss sebelumnya","jumlah final loss fraud sebelumnya",
                                "fraud periode sebelumnya","final loss by pic",
@@ -196,14 +222,76 @@ var COLUMN_MAPPING = {
   "double_transfer":          ["double tf","potongan double tf","double tf loss"],
   "total_potongan":           ["total potongan","total deduction"],
   "thp":                      ["thp","net salary"],
-  "no_rekening":              ["nomor rekening","no rekening"],
-  "nama_rekening":            ["nama pemilik rekening","nama rekening"],
-  "bank_name":                ["bank","nama bank","name bank"],
-  "status_rek":               ["status rek"],
-  "status_pembayaran":        ["status pembayaran","status tf"],
-  "tanggal_pembayaran":       ["tanggal pembayaran","tanggal transfer","tanggal tf"],
-  "id_transaksi":             ["id transaksi"],
-  "bukti_tf":                 ["bukti tf","bukti transfer","bukti tranfer"],
+  // ── 8 kolom banking/payment — diperluas alias-nya ──────────────────────────
+  // BUG FIX: Banyak file menggunakan variasi nama header yang sebelumnya tidak ter-cover.
+  // Penambahan alias TIDAK mengubah logic, hanya memperluas pencocokan header.
+
+  "no_rekening": [
+    "nomor rekening","no rekening",
+    // Variasi dengan titik (contoh: "No. Rekening") — titik bikin exact match gagal
+    "no. rekening",
+    // Variasi typo / singkatan
+    "nomer rekening","no rek","nomor rek","no.rekening","nomer rek",
+    // English variant
+    "account number","account no","acc number","acc no"
+  ],
+
+  "nama_rekening": [
+    "nama pemilik rekening","nama rekening",
+    // Variasi nama
+    "nama penerima","atas nama","nama penerima rekening",
+    "nama pemilik rek","nama rek",
+    // English variant
+    "account name","account holder","beneficiary name"
+  ],
+
+  "bank_name": [
+    "bank","nama bank","name bank",
+    // Variasi
+    "bank penerima","kode bank","bank name","nama bank penerima",
+    "bank tujuan","bank transfer"
+  ],
+
+  "status_rek": [
+    "status rek",
+    // Variasi
+    "status rekening","sts rek","sts rekening",
+    "account status","status account"
+  ],
+
+  "status_pembayaran": [
+    "status pembayaran","status tf",
+    // ← BUG KONFIRMASI dari Image 1: Daily Courier Biweekly pakai "Status Transfer"
+    "status transfer",
+    // Variasi lain
+    "sts pembayaran","sts tf","sts transfer",
+    "payment status","transfer status"
+  ],
+
+  "tanggal_pembayaran": [
+    "tanggal pembayaran","tanggal transfer","tanggal tf",
+    // Variasi singkatan "tgl" — umum di banyak file payroll
+    "tgl pembayaran","tgl transfer","tgl tf",
+    "tanggal bayar","tgl bayar",
+    // English variant
+    "payment date","transfer date","date of transfer"
+  ],
+
+  "id_transaksi": [
+    "id transaksi",
+    // Variasi — beberapa file pakai "No." bukan "ID"
+    "no transaksi","no. transaksi","nomor transaksi",
+    "kode transaksi","transaction id","id transaction",
+    "ref id","reference id","no ref","no. ref"
+  ],
+
+  "bukti_tf": [
+    "bukti tf","bukti transfer","bukti tranfer",
+    // Variasi link/screenshot
+    "link tf","link bukti","link bukti tf",
+    "screenshot tf","link transfer","link transaksi",
+    "attachment tf","foto tf","bukti bayar"
+  ],
   "alasan_pending":           ["alasan belum dibayarkan","alasan pembayaran",
                                "alasan belum terbayarkan"],
 };
@@ -692,6 +780,8 @@ function convertXlsxToTempSheet(xlsxFile, outputFolder) {
 function processXlsxFile(tempSS, fileName, periode) {
   var payrollGroup     = classifyPayrollGroup(fileName);
   var isCampaignInc    = (payrollGroup === "Campaign Inc");
+  // [FIX 4] Monthly Incentive juga perlu subtotal_1 = incentive
+  var isMonthlyInc     = (payrollGroup === "Monthly Incentive" || payrollGroup === "Monthly Incentive Plus");
   var allRows          = [];
 
   // [FIX 1] Ambil daftar sheet name yang diizinkan untuk group ini
@@ -724,7 +814,7 @@ function processXlsxFile(tempSS, fileName, periode) {
 
     Logger.log('  Memproses sheet: "' + targetName + '"');
     try {
-      var rows = extractFromSheet(sheet, fileName, periode, payrollGroup, isCampaignInc);
+      var rows = extractFromSheet(sheet, fileName, periode, payrollGroup, isCampaignInc, isMonthlyInc);
       Logger.log('  → ' + rows.length + ' baris dari "' + targetName + '".');
       allRows = allRows.concat(rows);
     } catch(e) {
@@ -738,7 +828,7 @@ function processXlsxFile(tempSS, fileName, periode) {
 // ─────────────────────────────────────────────────────────────
 //  extractFromSheet() — TIDAK DIUBAH (logic bisnis intact)
 // ─────────────────────────────────────────────────────────────
-function extractFromSheet(sheet, fileName, periode, payrollGroup, isCampaignInc) {
+function extractFromSheet(sheet, fileName, periode, payrollGroup, isCampaignInc, isMonthlyInc) {
   var lastRow = sheet.getLastRow();
   var lastCol = sheet.getLastColumn();
   if (lastRow < 2 || lastCol < 1) return [];
@@ -754,7 +844,7 @@ function extractFromSheet(sheet, fileName, periode, payrollGroup, isCampaignInc)
 
   var subHeaderInfo = detectSubHeaderRow(rawData, headerRowIdx, startCol, lastCol);
   var dataOffset    = subHeaderInfo.hasSubHeader ? 2 : 1;
-  var colMap        = buildColumnMap(rawData[headerRowIdx], startCol, lastCol, subHeaderInfo, isCampaignInc);
+  var colMap        = buildColumnMap(rawData, headerRowIdx, startCol, lastCol, subHeaderInfo, isCampaignInc, payrollGroup);
 
   // Scan ke bawah jika ada baris kosong antara header dan data (fix off-by-one)
   var firstDataRow = headerRowIdx + dataOffset;
@@ -774,6 +864,11 @@ function extractFromSheet(sheet, fileName, periode, payrollGroup, isCampaignInc)
     if (isSummaryOrEmptyRow(rowData, colMap, startCol, lastCol)) continue;
 
     var record     = buildRecord(rowData, colMap, periode, payrollGroup, fileName);
+
+    // [FIX 1] total_pot_bpjs_karyawan selalu dihitung = tk + kes (bukan baca dari header)
+    // Ini mencegah double-counting jika source file juga punya kolom "Total BPJS yang Dipotong"
+    record["total_pot_bpjs_karyawan"] = toNum(record["total_pot_bpjs_tk"]) + toNum(record["total_pot_bpjs_kes"]);
+
     var hasCodLive = !!colMap["cod_live"];
     var hasLndLive = !!colMap["lnd_live"];
     var hasCod     = !!colMap["cod"];
@@ -788,6 +883,7 @@ function extractFromSheet(sheet, fileName, periode, payrollGroup, isCampaignInc)
     record["total_fraud"] = toNum(record["fraud_live"]) + toNum(record["fraud"]);
 
     if (isCampaignInc) applyCampaignIncLogic(record);
+    if (isMonthlyInc)  applyMonthlyIncLogic(record);   // [FIX 4]
 
     applyDefaults(record);
     extractedRows.push(record);
@@ -850,17 +946,127 @@ function detectSubHeaderRow(rawData, headerRowIdx, startCol, lastCol) {
   return result;
 }
 
-function buildColumnMap(headerRow, startCol, lastCol, subHeaderInfo, isCampaignInc) {
-  var colMap = {}, lookup = getAliasLookup();
-  var scanC  = Math.min(headerRow.length, CONFIG.MAX_HEADER_SCAN_COLS);
+// ─────────────────────────────────────────────────────────────
+//  resolveCodLndByWindow — Resolusi COD/LND live vs invoice
+//  menggunakan window scan multi-row.
+//
+//  MASALAH SEBELUMNYA: detectSubHeaderRow hanya cek SATU baris
+//  tepat di bawah header → label "Invoice"/"Live" yang ada di
+//  baris berbeda (mis. 2-3 baris dari main header) tidak terdeteksi.
+//
+//  SOLUSI: scan window [headerRowIdx-2 ... headerRowIdx+4] pada
+//  kolom yang sama, gabungkan seluruh teks, lalu cek:
+//    - ada "live"    → cod_live / lnd_live
+//    - ada "invoice" → tetap cod / lnd
+//    - tidak ada    → fallback ke cod / lnd (default = invoice)
+//
+//  AMAN karena: nilai numerik (misal "3,428,293") tidak mengandung
+//  kata "live" / "invoice", sehingga data baris tidak akan false-match.
+// ─────────────────────────────────────────────────────────────
+function resolveCodLndByWindow(baseField, colIdx, rawData, winStart, winEnd) {
+  var combined = "";
+  for (var wr = winStart; wr <= winEnd; wr++) {
+    var v = String((rawData[wr] || [])[colIdx] || "").trim();
+    if (v) combined += " " + v;
+  }
+  var norm = normalizeText(combined);
 
-  for (var c = startCol; c < scanC; c++) {
-    var cell = String(headerRow[c] || "").trim().toLowerCase();
+  if (norm.indexOf("live") !== -1) {
+    // Indikator "live" ditemukan di window kolom ini
+    return (baseField === "cod") ? "cod_live" : "lnd_live";
+  }
+  // "invoice", "pot invoice", atau tidak ada indikasi → default invoice
+  return baseField;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  matchesFraudHoldAlias — Cek apakah teks header kolom cocok
+//  dengan alias fraud_hold yang diharapkan untuk payroll group.
+//
+//  Normalisasi keduanya (normalizeText) sebelum dibandingkan:
+//  toleran terhadap "Hold/Potong", "hold-potong", "HOLD POTONG".
+//
+//  Jika group TIDAK ADA di FRAUD_HOLD_ALIAS_MAP → return true
+//  (accept semua alias, backward compatible).
+//
+//  Urutan pencocokan:
+//  1. Exact normalized match
+//  2. Substring match (cell ⊆ expected atau expected ⊆ cell)
+//  3. Fuzzy: ≥70% kata signifikan (len > 2) dari expected ada di cell
+// ─────────────────────────────────────────────────────────────
+function matchesFraudHoldAlias(cellText, payrollGroup) {
+  var expected = FRAUD_HOLD_ALIAS_MAP[payrollGroup];
+  if (!expected) return true; // group tidak dikonfigurasi → accept semua
+
+  var normCell = normalizeText(cellText);
+  var normExp  = normalizeText(expected);
+
+  // 1. Exact normalized
+  if (normCell === normExp) return true;
+
+  // 2. Substring
+  if (normCell.indexOf(normExp) !== -1 || normExp.indexOf(normCell) !== -1) return true;
+
+  // 3. Fuzzy word match (≥70% kata penting)
+  var words = normExp.split(" ").filter(function(w) { return w.length > 2; });
+  if (words.length === 0) return false;
+  var hit = 0;
+  for (var i = 0; i < words.length; i++) {
+    if (normCell.indexOf(words[i]) !== -1) hit++;
+  }
+  return hit >= Math.ceil(words.length * 0.7);
+}
+
+// ─────────────────────────────────────────────────────────────
+//  buildColumnMap — Peta kolom: field → [colIndex, ...]
+//
+//  PERUBAHAN DARI VERSI SEBELUMNYA:
+//  1. [REQ-1] Tambah parameter payrollGroup — digunakan oleh
+//     matchesFraudHoldAlias untuk filter alias fraud_hold_potong
+//     agar hanya kolom sumber yang tepat yang di-map per group.
+//  2. [REQ-2] COD/LND disambiguation kini pakai resolveCodLndByWindow
+//     (window scan ±4 baris) menggantikan cek sub-header kaku.
+//     Selain itu, cell juga dicek di 1-2 baris BAWAH headerRow
+//     untuk menangkap COD/LND header yang berada di bawah main header.
+//
+//  TIDAK DIUBAH: logika lookup, guard no_telepon, Fix-2 (merge above).
+// ─────────────────────────────────────────────────────────────
+function buildColumnMap(rawData, headerRowIdx, startCol, lastCol, subHeaderInfo, isCampaignInc, payrollGroup) {
+  var colMap  = {}, lookup = getAliasLookup();
+  var hRow    = rawData[headerRowIdx] || [];
+  var scanC   = Math.min(hRow.length, CONFIG.MAX_HEADER_SCAN_COLS);
+
+  // Window untuk resolveCodLndByWindow (scan ±4 baris dari header)
+  var winStart = Math.max(0, headerRowIdx - 2);
+  var winEnd   = Math.min(rawData.length - 1, headerRowIdx + 4);
+
+  for (var c = 0; c < scanC; c++) {
+
+    // ── Step 1: Tentukan cell header utama ────────────────────
+    var cell = String(hRow[c] || "").trim().toLowerCase();
+
+    // Cek 1-2 baris DI ATAS (Fix 2 — merged cell vertikal)
+    if (!cell && headerRowIdx >= 1) {
+      cell = String((rawData[headerRowIdx - 1] || [])[c] || "").trim().toLowerCase();
+    }
+    if (!cell && headerRowIdx >= 2) {
+      cell = String((rawData[headerRowIdx - 2] || [])[c] || "").trim().toLowerCase();
+    }
+    // [REQ-2] Cek 1-2 baris DI BAWAH header jika masih kosong
+    // Menangkap label COD/LND yang berada di baris bawah main header
+    if (!cell && headerRowIdx + 1 <= winEnd) {
+      cell = String((rawData[headerRowIdx + 1] || [])[c] || "").trim().toLowerCase();
+    }
+    if (!cell && headerRowIdx + 2 <= winEnd) {
+      cell = String((rawData[headerRowIdx + 2] || [])[c] || "").trim().toLowerCase();
+    }
     if (!cell) continue;
 
+    // ── Step 2: Lookup field ──────────────────────────────────
     var field = null;
-    if (lookup[cell]) { field = lookup[cell]; }
-    else {
+    if (lookup[cell]) {
+      field = lookup[cell];
+    } else {
       for (var kw in lookup) {
         if (kw.length <= 3) continue;
         if (cell.indexOf(kw) !== -1 || kw.indexOf(cell) !== -1) { field = lookup[kw]; break; }
@@ -868,13 +1074,28 @@ function buildColumnMap(headerRow, startCol, lastCol, subHeaderInfo, isCampaignI
     }
     if (!field) continue;
 
+    // ── Step 3: Guard no_telepon (tidak berubah) ──────────────
+    if (field === "no_telepon") {
+      var hasPhoneKw = (
+        cell.indexOf("hp")        !== -1 || cell.indexOf("phone")     !== -1 ||
+        cell.indexOf("telp")      !== -1 || cell.indexOf("handphone") !== -1 ||
+        cell.indexOf("telepon")   !== -1 || cell.indexOf("mobile")    !== -1
+      );
+      if (!hasPhoneKw) continue;
+    }
+
+    // ── Step 4: [REQ-2] COD/LND disambiguasi via window scan ──
+    // Menggantikan cek sub-header kaku — sekarang scan ±4 baris
+    // pada kolom yang sama untuk temukan "live" / "invoice".
     if (field === "cod" || field === "lnd") {
-      if (subHeaderInfo.hasSubHeader) {
-        var subLabel = subHeaderInfo.subHeaderMap[c] || "";
-        if (subLabel.indexOf("live") !== -1) {
-          field = (field === "cod") ? "cod_live" : "lnd_live";
-        }
-      }
+      field = resolveCodLndByWindow(field, c, rawData, winStart, winEnd);
+    }
+
+    // ── Step 5: [REQ-1] fraud_hold filter per payroll group ───
+    // Hanya map kolom ini jika nama headernya sesuai alias yang
+    // diharapkan untuk payroll group saat ini (via FRAUD_HOLD_ALIAS_MAP).
+    if (field === "fraud_hold_potong/collect") {
+      if (!matchesFraudHoldAlias(cell, payrollGroup)) continue;
     }
 
     if (!colMap[field]) colMap[field] = [];
@@ -926,6 +1147,12 @@ function applyCampaignIncLogic(record) {
   record["commission"] = inc;
   record["subtotal_1"] = inc;
   record["fraud_hold_potong/collect"] = (inc >= totalFraud) ? totalFraud : inc;
+}
+
+// [FIX 4] Monthly Incentive: subtotal_1 = incentive (tanpa mengubah fraud_hold logic)
+function applyMonthlyIncLogic(record) {
+  var inc = toNum(record["incentive"]) || toNum(record["commission"]);
+  record["subtotal_1"] = inc;
 }
 
 function applyDefaults(record) {
@@ -1055,4 +1282,27 @@ function getFirstValue(rowData, colIndices) {
     if (v !== null && v !== undefined && String(v).trim() !== "") return v;
   }
   return "";
+}
+
+// ─────────────────────────────────────────────────────────────
+//  normalizeText — Helper normalisasi string yang reusable
+//
+//  Melakukan:
+//  1. Lowercase
+//  2. Trim spasi depan/belakang
+//  3. Ganti tanda baca / - _ . , ( ) * # @ ! ? : ;  → spasi
+//  4. Collapse multiple spasi → satu spasi
+//
+//  Tujuan: matching toleran terhadap variasi penulisan seperti:
+//    "Hold/Potong", "Hold / Potong", "hold-potong", "HOLD POTONG"
+//  Semuanya menjadi: "hold potong"
+// ─────────────────────────────────────────────────────────────
+function normalizeText(s) {
+  if (!s && s !== 0) return "";
+  return String(s)
+    .toLowerCase()
+    .replace(/[\t\n\r]+/g, " ")
+    .replace(/[\/\-\_\.\,\(\)\*\#\@\!\?\:\;]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
